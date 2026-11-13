@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Khmer Voice Studio</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --card: #ffffff; --text: #1f1e1b; --muted: #6b6a64; --line: #dedcd3;
+    --accent: #0f6e56; --accent-text: #ffffff; --soft: #e1f5ee; --danger: #a32d2d;
+    --khmer: "Noto Sans Khmer", "Khmer Sangam MN", "Khmer MN", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #171715; --card: #22221f; --text: #ecebe6; --muted: #a3a29b; --line: #3a3934;
+            --accent: #5dcaa5; --accent-text: #04342c; --soft: #0f3a2f; --danger: #f09595; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 24px; font-weight: 600; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin-bottom: 20px; }
+  .tabs button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 10px 14px;
+                 font: inherit; font-weight: 500; color: var(--muted); cursor: pointer; margin-bottom: -1px; }
+  .tabs button[aria-selected="true"] { color: var(--text); border-color: var(--accent); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+  label { display: block; font-weight: 500; margin: 0 0 6px; }
+  .hint { color: var(--muted); font-size: 14px; font-weight: 400; }
+  .field { margin-bottom: 18px; }
+  textarea, select, input[type=file] { width: 100%; font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  textarea { font-family: var(--khmer); font-size: 18px; min-height: 120px; resize: vertical; }
+  textarea:focus, select:focus, input:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .row { display: flex; gap: 12px; align-items: center; }
+  input[type=range] { flex: 1; accent-color: var(--accent); }
+  .go { background: var(--accent); color: var(--accent-text); border: 0; border-radius: 8px; padding: 12px 20px;
+        font: inherit; font-weight: 600; cursor: pointer; width: 100%; }
+  .go:disabled { opacity: .6; cursor: progress; }
+  .status { margin-top: 14px; color: var(--muted); min-height: 1.6em; }
+  .status.error { color: var(--danger); }
+  .result { margin-top: 16px; padding: 16px; border-radius: 8px; background: var(--soft); }
+  .result audio { width: 100%; }
+  .result a { color: var(--text); font-size: 14px; }
+  .count { text-align: right; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Khmer Voice Studio</h1>
+  <p class="sub">Turn Khmer text into speech, or speak it in a cloned voice.</p>
+
+  <div class="tabs" role="tablist">
+    <button role="tab" id="tab-tts" aria-selected="true" aria-controls="panel">Text to speech</button>
+    <button role="tab" id="tab-clone" aria-selected="false" aria-controls="panel">Voice clone</button>
+  </div>
+
+  <form class="card" id="panel" role="tabpanel">
+    <div class="field">
+      <label for="text">Khmer text <span class="hint">— write it the way people talk: "...", commas, small fillers. Gemini voices also take &lt;breath&gt;, &lt;short pause&gt;, &lt;laugh&gt;.</span></label>
+      <textarea id="text" maxlength="2000" required lang="km">សួស្តីបង! &lt;breath&gt; ថ្ងៃនេះ... សុខសប្បាយទេ? អូ៎ ខ្ញុំទើបតែមកពីផ្សារ, ហើយទិញផ្លែឈើមកខ្លះ។ &lt;short pause&gt; ល្ងាចនេះ យើងទៅញ៉ាំបាយជាមួយគ្នាណា។</textarea>
+      <div class="hint count"><span id="count">0</span> / 2000</div>
+    </div>
+
+    <div class="field">
+      <label for="base">Base voice <span class="hint">— who reads the text</span></label>
+      <select id="base"></select>
+    </div>
+
+    <div id="clone-fields" hidden>
+      <div class="field">
+        <label for="ref">Voice to clone <span class="hint">— 10–60 s of clear speech, any language</span></label>
+        <input type="file" id="ref" accept="audio/*">
+        <audio id="ref-preview" controls hidden style="width:100%;margin-top:8px"></audio>
+      </div>
+      <div class="field">
+        <label for="tau">tau <span class="hint">— converter setting, default 0.3</span></label>
+        <div class="row"><input type="range" id="tau" min="0.05" max="1" step="0.05" value="0.3"><output id="tau-val">0.30</output></div>
+      </div>
+    </div>
+
+    <button class="go" id="go" type="submit">Generate speech</button>
+    <div class="status" id="status" role="status" aria-live="polite"></div>
+    <div class="result" id="result" hidden>
+      <audio id="player" controls></audio>
+      <a id="download" download>Download audio</a>
+    </div>
+  </form>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let mode = "tts";
+
+fetch("/api/voices").then(r => r.json()).then(list => {
+  $("base").innerHTML = list.map(v => `<option value="${v.id}">${v.label}</option>`).join("");
+}).catch(() => setStatus("Could not reach the server.", true));
+
+function setMode(m) {
+  mode = m;
+  $("tab-tts").setAttribute("aria-selected", m === "tts");
+  $("tab-clone").setAttribute("aria-selected", m === "clone");
+  $("clone-fields").hidden = m !== "clone";
+  $("go").textContent = m === "clone" ? "Generate cloned voice" : "Generate speech";
+  $("result").hidden = true;
+  setStatus("");
+}
+$("tab-tts").onclick = () => setMode("tts");
+$("tab-clone").onclick = () => setMode("clone");
+
+const updateCount = () => $("count").textContent = $("text").value.length;
+$("text").oninput = updateCount; updateCount();
+$("tau").oninput = () => $("tau-val").textContent = Number($("tau").value).toFixed(2);
+$("ref").onchange = () => {
+  const f = $("ref").files[0];
+  $("ref-preview").hidden = !f;
+  if (f) $("ref-preview").src = URL.createObjectURL(f);
+  setStatus("");
+};
+
+function setStatus(msg, isError = false) {
+  $("status").textContent = msg;
+  $("status").classList.toggle("error", isError);
+}
+
+$("panel").onsubmit = async (e) => {
+  e.preventDefault();
+  if (!$("text").value.trim()) return setStatus("Enter some Khmer text first.", true);
+  const ref = $("ref").files[0];
+  if (mode === "clone" && !ref) return setStatus("Choose a recording of the voice to clone first.", true);
+
+  const body = new FormData();
+  body.append("text", $("text").value);
+  body.append("base", $("base").value);
+  if (mode === "clone") { body.append("reference", ref); body.append("tau", $("tau").value); }
+
+  $("go").disabled = true; $("result").hidden = true;
+  const t0 = Date.now();
+  const tick = setInterval(() => setStatus(`Working… ${Math.round((Date.now() - t0) / 1000)} s`), 500);
+  try {
+    const res = await fetch(`/api/${mode}`, { method: "POST", body });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      const detail = typeof err.detail === "string" ? err.detail : err.detail?.[0]?.msg;
+      throw new Error(detail || `Server error (${res.status})`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    $("player").src = url;
+    $("download").href = url;
+    $("download").download = `khmer-${mode}-${Date.now()}.${blob.type.includes("mpeg") ? "mp3" : "wav"}`;
+    $("result").hidden = false;
+    setStatus(`Done in ${Math.round((Date.now() - t0) / 1000)} s.`);
+    $("player").play().catch(() => {});
+  } catch (err) {
+    setStatus(err.message, true);
+  } finally {
+    clearInterval(tick);
+    $("go").disabled = false;
+  }
+};
+</script>
+</body>
+</html>
