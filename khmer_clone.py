@@ -10,11 +10,14 @@ Usage:
       text is sent to Google.
   edge:km-KH-SreymomNeural / edge:km-KH-PisethNeural
       Microsoft neural voices (female / male) via edge-tts. Most natural; text is sent to Microsoft.
+  voxcpm:female / voxcpm:male
+      OpenBMB VoxCPM2 (Apache-2.0), local and free; ~5 GB model, uses the Mac GPU (MPS). With --ref it
+      clones the voice itself instead of going through the OpenVoice converter.
   facebook/mms-tts-khm (default), khmerttsopensource/khmer-tts, KrorngAI/mms-tts-khm-finetuned
       Local VITS models (CC-BY-NC, non-commercial).
 
 The VITS models need transformers>=4.33 but MeloTTS pins 4.27.4, so on import this module relaunches
-the running script via `uv run --with transformers==4.46.3` (the venv itself stays untouched).
+the running script via `uv run --with transformers==4.46.3 --with voxcpm` (the venv itself stays untouched).
 """
 import argparse
 import asyncio
@@ -36,7 +39,7 @@ except ImportError:
         raise
     os.environ["KHMER_CLONE_RELAUNCHED"] = "1"
     os.execvp("uv", ["uv", "run", "--no-project", "--python", sys.executable,
-                     "--with", "transformers==4.46.3", sys.argv[0], *sys.argv[1:]])
+                     "--with", "transformers==4.46.3", "--with", "voxcpm", sys.argv[0], *sys.argv[1:]])
 
 import numpy as np
 import soundfile
@@ -59,6 +62,8 @@ DEVICE = "cpu"
 BASES = {
     "gemini:Kore": "Google Gemini Kore (female, online, most natural)",
     "gemini:Puck": "Google Gemini Puck (male, online, most natural)",
+    "voxcpm:female": "OpenBMB VoxCPM2 female (local, free)",
+    "voxcpm:male": "OpenBMB VoxCPM2 male (local, free)",
     "edge:km-KH-SreymomNeural": "Microsoft Sreymom (female, online)",
     "edge:km-KH-PisethNeural": "Microsoft Piseth (male, online)",
     "khmerttsopensource/khmer-tts": "Community khmer-tts (local)",
@@ -129,11 +134,18 @@ def gemini_tts(text, path, voice, style=None):
                 resp = json.load(r)
             break
         except urllib.error.HTTPError as e:
-            msg = e.read().decode()[:300]
+            body = e.read().decode()
+            try:
+                msg = json.loads(body)["error"]["message"]
+            except (ValueError, KeyError, TypeError):
+                msg = body[:300]
             # Free tier: 3 requests/minute (worth waiting out) and 10/day (not).
-            if e.code != 429 or "per day" in msg or attempt == 3:
-                raise RuntimeError(f"Gemini TTS {e.code}: {msg}") from None
-            time.sleep(21)
+            if e.code == 429 and "per day" not in msg and attempt < 3:
+                time.sleep(21)
+                continue
+            if e.code == 429:
+                msg += " Use a Microsoft voice meanwhile."
+            raise ValueError(f"Gemini: {msg}") from None  # ValueError -> shown to the web user as a 400
     audio = [c for st in resp.get("steps", []) if st.get("type") == "model_output"
              for c in st.get("content", []) if c.get("type") == "audio"]
     if not audio:
@@ -143,11 +155,54 @@ def gemini_tts(text, path, voice, style=None):
     return path
 
 
+# VoxCPM "voice design": a description in parentheses before the text picks the voice and delivery.
+VOXCPM_VOICES = {
+    # Picked by listening test (sample E): describe a chat with a friend, not just a voice.
+    "voxcpm:female": ("A young Cambodian woman chatting with a close friend, natural relaxed pace, "
+                      "a smile in her voice, everyday conversational Khmer"),
+    "voxcpm:male": ("A young Cambodian man chatting with a close friend, natural relaxed pace, "
+                    "a smile in his voice, everyday conversational Khmer"),
+}
+VOXCPM_STYLE = "casual and friendly"  # used when cloning: the reference decides the voice
+
+
+@functools.lru_cache(maxsize=1)
+def get_voxcpm():
+    from voxcpm import VoxCPM
+    return VoxCPM.from_pretrained("openbmb/VoxCPM2", load_denoiser=False)  # device auto: mps on a Mac
+
+
+def voxcpm_tts(text, path, voice=None, ref=None):
+    """Design a voice from VOXCPM_VOICES, or clone `ref` directly (VoxCPM does its own voice cloning)."""
+    text = re.sub(r"<[^>]*>", " ", text).strip()  # Gemini-only tags
+    if not text:
+        raise ValueError("No Khmer text to speak.")
+    model = get_voxcpm()
+    kw = {}
+    if ref:
+        import librosa
+        wav, sr = librosa.load(ref, sr=None)  # any upload format -> wav VoxCPM can read
+        ref_wav = path.rsplit(".", 1)[0] + "_ref.wav"
+        soundfile.write(ref_wav, wav, sr)
+        kw["reference_wav_path"] = ref_wav
+    try:
+        wav = model.generate(text=f"({VOXCPM_STYLE if ref else VOXCPM_VOICES[voice]}){text}",
+                             cfg_value=1.5, inference_timesteps=20, **kw)  # looser = more lively
+    finally:
+        if ref:
+            os.remove(kw["reference_wav_path"])  # don't keep copies of people's uploaded voices
+    wav = wav * (0.9 / max(np.abs(wav).max(), 1e-6))  # VoxCPM comes out ~half as loud as the other voices
+    soundfile.write(path, wav, model.tts_model.sample_rate)
+    return path
+
+
 @functools.lru_cache(maxsize=None)
 def get_tts(base):
     """Return tts(text, path) -> written audio path. Models load once per base."""
     if base.startswith("gemini:"):
         return functools.partial(gemini_tts, voice=base.split(":", 1)[1])
+    if base.startswith("voxcpm:"):
+        return functools.partial(voxcpm_tts, voice=base)
     if base.startswith("edge:"):
         import edge_tts
         import librosa
@@ -204,6 +259,8 @@ def source_se(base):
 def clone(text, base, ref, out, tau=0.3, speech=None):
     """Speak `text` with `base` (or use `speech`, a real Khmer recording), then convert it to the voice in `ref`.
     Returns (out, base_audio_path)."""
+    if base.startswith("voxcpm:") and not speech:  # clones by itself, better than TTS + converter
+        return voxcpm_tts(text, out, ref=ref), None
     tcc = get_converter()
     tgt, _ = se_extractor.get_se(ref, tcc, vad=True)
     if speech:  # most human option: a person's own timing/intonation, only the voice gets swapped
@@ -230,7 +287,7 @@ def main():
         ap.error("give Khmer text or --speech")
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     out, base_audio = clone(args.text, args.base, args.ref, args.out, args.tau, args.speech)
-    print("wrote", out, "(base audio:", base_audio + ")")
+    print("wrote", out, f"(base audio: {base_audio})" if base_audio else "")
 
 
 if __name__ == "__main__":
