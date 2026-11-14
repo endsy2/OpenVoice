@@ -73,7 +73,8 @@
         <input type="file" id="ref" accept="audio/*">
         <audio id="ref-preview" controls hidden style="width:100%;margin-top:8px"></audio>
       </div>
-      <div class="field">
+      <p class="hint" id="vox-note" hidden>VoxCPM copies the uploaded voice directly, so female/male above doesn't matter here.</p>
+      <div class="field" id="tau-field">
         <label for="tau">tau <span class="hint">— converter setting, default 0.3</span></label>
         <div class="row"><input type="range" id="tau" min="0.05" max="1" step="0.05" value="0.3"><output id="tau-val">0.30</output></div>
       </div>
@@ -94,6 +95,7 @@ let mode = "tts";
 
 fetch("/api/voices").then(r => r.json()).then(list => {
   $("base").innerHTML = list.map(v => `<option value="${v.id}">${v.label}</option>`).join("");
+  syncVox();
 }).catch(() => setStatus("Could not reach the server.", true));
 
 function setMode(m) {
@@ -104,7 +106,15 @@ function setMode(m) {
   $("go").textContent = m === "clone" ? "Generate cloned voice" : "Generate speech";
   $("result").hidden = true;
   setStatus("");
+  syncVox();
 }
+// VoxCPM clones by itself (no OpenVoice converter), so tau does nothing for it.
+function syncVox() {
+  const vox = $("base").value.startsWith("voxcpm:");
+  $("tau-field").hidden = vox;
+  $("vox-note").hidden = !vox;
+}
+$("base").onchange = syncVox;
 $("tab-tts").onclick = () => setMode("tts");
 $("tab-clone").onclick = () => setMode("clone");
 
@@ -132,7 +142,7 @@ $("panel").onsubmit = async (e) => {
   const body = new FormData();
   body.append("text", $("text").value);
   body.append("base", $("base").value);
-  if (mode === "clone") { body.append("reference", ref); body.append("tau", $("tau").value); }
+  if (mode === "clone") { body.append("reference", ref); body.append("tau", $("tau").value); }  // server ignores tau for VoxCPM
 
   $("go").disabled = true; $("result").hidden = true;
   const t0 = Date.now();

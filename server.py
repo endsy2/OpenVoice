@@ -2,6 +2,7 @@
 
   .venv/bin/python server.py      -> http://127.0.0.1:8000
 """
+import glob
 import os
 import threading
 import uuid
@@ -18,6 +19,8 @@ MAX_UPLOAD = 30 * 1024 * 1024
 AUDIO_EXT = {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".webm", ".aac"}
 
 os.makedirs(OUT, exist_ok=True)
+for f in glob.glob(f"{OUT}/*_ref*"):  # uploaded voices left behind when a request was killed mid-way
+    os.remove(f)
 app = FastAPI()
 # ponytail: one generation at a time (the models aren't thread-safe); add a job queue if several people share it.
 lock = threading.Lock()

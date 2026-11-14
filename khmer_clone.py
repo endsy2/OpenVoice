@@ -28,6 +28,7 @@ import os
 import random
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -211,8 +212,15 @@ def get_tts(base):
         def synth(sent, rng):
             # Microsoft's Khmer voices read a bit fast and flat: slow down a touch and wobble pitch per sentence.
             tmp = f"outputs_v2/_edge_{os.getpid()}.mp3"
-            com = edge_tts.Communicate(sent, voice, rate=f"{rng.randint(-12, -2):+d}%", pitch=f"{rng.randint(-4, 3):+d}Hz")
-            asyncio.run(com.save(tmp))
+            rate, pitch = f"{rng.randint(-12, -2):+d}%", f"{rng.randint(-4, 3):+d}Hz"
+            for attempt in range(6):  # the service randomly drops ~1 in 3 requests (NoAudioReceived)
+                try:
+                    asyncio.run(edge_tts.Communicate(sent, voice, rate=rate, pitch=pitch).save(tmp))
+                    break
+                except edge_tts.exceptions.NoAudioReceived:
+                    if attempt == 5:
+                        raise ValueError("Microsoft's voice service isn't answering right now; try again shortly.")
+                    time.sleep(0.5)
             wav, _ = librosa.load(tmp, sr=24000)
             os.remove(tmp)
             return librosa.effects.trim(wav, top_db=45)[0]  # we add our own pauses
@@ -262,9 +270,12 @@ def clone(text, base, ref, out, tau=0.3, speech=None):
     if base.startswith("voxcpm:") and not speech:  # clones by itself, better than TTS + converter
         return voxcpm_tts(text, out, ref=ref), None
     tcc = get_converter()
-    tgt, _ = se_extractor.get_se(ref, tcc, vad=True)
+    # get_se keeps 10 s slices of each recording under target_dir; people's voices go in a temp dir, deleted after.
+    with tempfile.TemporaryDirectory() as tmp:
+        tgt, _ = se_extractor.get_se(ref, tcc, target_dir=tmp, vad=True)
+        src = se_extractor.get_se(speech, tcc, target_dir=tmp, vad=True)[0] if speech else None
     if speech:  # most human option: a person's own timing/intonation, only the voice gets swapped
-        base_audio, src = speech, se_extractor.get_se(speech, tcc, vad=True)[0]
+        base_audio = speech
     else:
         base_audio, src = get_tts(base)(text, out.rsplit(".", 1)[0] + "_base.wav"), source_se(base)
     tcc.convert(audio_src_path=base_audio, src_se=src, tgt_se=tgt, output_path=out, tau=tau, message="@MyShell")
